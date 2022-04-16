@@ -15,7 +15,7 @@ use nu_cli::{
     evaluate_commands, evaluate_file, evaluate_repl, gather_parent_env_vars, get_init_cwd,
     report_error,
 };
-use nu_command::{create_default_context, BufferedReader};
+use nu_command::create_default_context;
 use nu_engine::{get_full_help, CallExt};
 use nu_parser::parse;
 use nu_protocol::{
@@ -25,8 +25,9 @@ use nu_protocol::{
     Spanned, SyntaxShape, Value, CONFIG_VARIABLE_ID,
 };
 use std::cell::RefCell;
+use std::io::{BufRead, BufReader, Read};
 use std::{
-    io::{BufReader, Write},
+    io::Write,
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -541,4 +542,38 @@ fn set_is_perf_value(value: bool) {
     IS_PERF.with(|new_value| {
         *new_value.borrow_mut() = value;
     });
+}
+
+pub struct BufferedReader<R: Read> {
+    pub input: BufReader<R>,
+}
+
+impl<R: Read> BufferedReader<R> {
+    pub fn new(input: BufReader<R>) -> Self {
+        Self { input }
+    }
+}
+
+impl<R: Read> Iterator for BufferedReader<R> {
+    type Item = Result<Vec<u8>, ShellError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let buffer = self.input.fill_buf();
+        match buffer {
+            Ok(s) => {
+                let result = s.to_vec();
+
+                let buffer_len = s.len();
+
+                if buffer_len == 0 {
+                    None
+                } else {
+                    self.input.consume(buffer_len);
+
+                    Some(Ok(result))
+                }
+            }
+            Err(e) => Some(Err(ShellError::IOError(e.to_string()))),
+        }
+    }
 }
