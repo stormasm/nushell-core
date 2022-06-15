@@ -14,33 +14,6 @@ fn proper_shadow() -> TestResult {
 }
 
 #[test]
-fn config_filesize_format_with_metric_true() -> TestResult {
-    // Note: this tests both the config variable and that it is properly captured into a block
-    run_test(
-        r#"let config = {"filesize_metric": true "filesize_format": "kib" }; do { 40kb | into string } "#,
-        "39.1 KiB",
-    )
-}
-
-#[test]
-fn config_filesize_format_with_metric_false_kib() -> TestResult {
-    // Note: this tests both the config variable and that it is properly captured into a block
-    run_test(
-        r#"let config = {"filesize_metric": false "filesize_format": "kib" }; do { 40kb | into string } "#,
-        "39.1 KiB",
-    )
-}
-
-#[test]
-fn config_filesize_format_with_metric_false_kb() -> TestResult {
-    // Note: this tests both the config variable and that it is properly captured into a block
-    run_test(
-        r#"let config = {"filesize_metric": false "filesize_format": "kb" }; do { 40kb | into string } "#,
-        "40.0 KB",
-    )
-}
-
-#[test]
 fn in_variable_1() -> TestResult {
     run_test(r#"[3] | if $in.0 > 4 { "yay!" } else { "boo" }"#, "boo")
 }
@@ -71,8 +44,16 @@ fn in_variable_6() -> TestResult {
 }
 
 #[test]
+fn in_and_if_else() -> TestResult {
+    run_test(
+        r#"[1, 2, 3] | if false {} else if true { $in | length }"#,
+        "3",
+    )
+}
+
+#[test]
 fn help_works_with_missing_requirements() -> TestResult {
-    run_test(r#"each --help | lines | length"#, "29")
+    run_test(r#"each --help | lines | length"#, "32")
 }
 
 #[test]
@@ -373,4 +354,9 @@ fn better_operator_spans() -> TestResult {
         r#"metadata ({foo: 10} | (20 - $in.foo)) | get span | $in.start < $in.end"#,
         "true",
     )
+}
+
+#[test]
+fn range_right_exclusive() -> TestResult {
+    run_test(r#"[1, 4, 5, 8, 9] | range 1..<3 | math sum"#, "9")
 }

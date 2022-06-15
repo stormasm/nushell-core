@@ -17,17 +17,18 @@ use nu_cli::{
 };
 use nu_command::create_default_context;
 use nu_engine::{get_full_help, CallExt};
-use nu_parser::parse;
+use nu_parser::{escape_for_script_arg, escape_quote_string, parse};
 use nu_protocol::{
     ast::{Call, Expr, Expression},
     engine::{Command, EngineState, Stack, StateWorkingSet},
     Category, Example, IntoPipelineData, PipelineData, RawStream, ShellError, Signature, Span,
-    Spanned, SyntaxShape, Value, CONFIG_VARIABLE_ID,
+    Spanned, SyntaxShape, Value,
 };
+use nu_utils::stdout_write_all_and_flush;
 use std::cell::RefCell;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, Read};
 use std::{
-    io::Write,
+    io::BufReader,
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -73,6 +74,16 @@ fn main() -> Result<()> {
     engine_state.ctrlc = Some(engine_state_ctrlc);
     // End ctrl-c protection section
 
+    // SIGQUIT protection section (only works for POSIX system)
+    #[cfg(not(windows))]
+    {
+        use signal_hook::consts::SIGQUIT;
+        let sig_quit = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(SIGQUIT, sig_quit.clone()).expect("Error setting SIGQUIT flag");
+        engine_state.set_sig_quit(sig_quit);
+    }
+    // End SIGQUIT protection section
+
     let mut args_to_nushell = vec![];
     let mut script_name = String::new();
     let mut args_to_script = vec![];
@@ -80,36 +91,26 @@ fn main() -> Result<()> {
     // Would be nice if we had a way to parse this. The first flags we see will be going to nushell
     // then it'll be the script name
     // then the args to the script
-    let mut collect_arg_nushell = false;
-    for arg in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         if !script_name.is_empty() {
-            args_to_script.push(if arg.contains(' ') {
-                format!("'{}'", arg)
-            } else {
-                arg
-            });
-        } else if collect_arg_nushell {
-            args_to_nushell.push(if arg.contains(' ') {
-                format!("'{}'", arg)
-            } else {
-                arg
-            });
-            collect_arg_nushell = false;
+            args_to_script.push(escape_for_script_arg(&arg));
         } else if arg.starts_with('-') {
             // Cool, it's a flag
-            if arg == "-c"
-                || arg == "--commands"
-                || arg == "--testbin"
-                || arg == "--log-level"
-                || arg == "--config"
-                || arg == "--env-config"
-                || arg == "--threads"
-                || arg == "-t"
-            {
-                collect_arg_nushell = true;
-            }
+            let flag_value = match arg.as_ref() {
+                "--commands" | "-c" | "--table-mode" | "-m" => {
+                    args.next().map(|a| escape_quote_string(&a))
+                }
+                "--config" | "--env-config" => args.next().map(|a| escape_quote_string(&a)),
+                "--log-level" | "--testbin" | "--threads" | "-t" => args.next(),
+                _ => None,
+            };
 
             args_to_nushell.push(arg);
+
+            if let Some(flag_value) = flag_value {
+                args_to_nushell.push(flag_value);
+            }
         } else {
             // Our script file
             script_name = arg;
@@ -194,17 +195,8 @@ fn main() -> Result<()> {
             }
 
             // First, set up env vars as strings only
-            gather_parent_env_vars(&mut engine_state);
+            gather_parent_env_vars(&mut engine_state, &init_cwd);
             let mut stack = nu_protocol::engine::Stack::new();
-
-            stack.vars.insert(
-                CONFIG_VARIABLE_ID,
-                Value::Record {
-                    cols: vec![],
-                    vals: vec![],
-                    span: Span::new(0, 0),
-                },
-            );
 
             if let Some(commands) = &binary_args.commands {
                 #[cfg(feature = "plugin")]
@@ -214,6 +206,25 @@ fn main() -> Result<()> {
                     NUSHELL_FOLDER,
                     is_perf_true(),
                 );
+                // only want to load config and env if relative argument is provided.
+                if binary_args.config_file.is_some() {
+                    config_files::read_config_file(
+                        &mut engine_state,
+                        &mut stack,
+                        binary_args.config_file,
+                        is_perf_true(),
+                        false,
+                    );
+                }
+                if binary_args.env_file.is_some() {
+                    config_files::read_config_file(
+                        &mut engine_state,
+                        &mut stack,
+                        binary_args.env_file,
+                        is_perf_true(),
+                        true,
+                    );
+                }
 
                 let ret_val = evaluate_commands(
                     commands,
@@ -222,11 +233,11 @@ fn main() -> Result<()> {
                     &mut stack,
                     input,
                     is_perf_true(),
+                    binary_args.table_mode,
                 );
                 if is_perf_true() {
                     info!("-c command execution {}:{}:{}", file!(), line!(), column!());
                 }
-
                 ret_val
             } else if !script_name.is_empty() && binary_args.interactive_shell.is_none() {
                 #[cfg(feature = "plugin")]
@@ -236,6 +247,25 @@ fn main() -> Result<()> {
                     NUSHELL_FOLDER,
                     is_perf_true(),
                 );
+                // only want to load config and env if relative argument is provided.
+                if binary_args.config_file.is_some() {
+                    config_files::read_config_file(
+                        &mut engine_state,
+                        &mut stack,
+                        binary_args.config_file,
+                        is_perf_true(),
+                        false,
+                    );
+                }
+                if binary_args.env_file.is_some() {
+                    config_files::read_config_file(
+                        &mut engine_state,
+                        &mut stack,
+                        binary_args.env_file,
+                        is_perf_true(),
+                        true,
+                    );
+                }
 
                 let ret_val = evaluate_file(
                     script_name,
@@ -256,11 +286,15 @@ fn main() -> Result<()> {
                     &mut stack,
                     binary_args.config_file,
                     binary_args.env_file,
+                    binary_args.login_shell.is_some(),
                 );
-                let history_path = config_files::create_history_path();
 
-                let ret_val =
-                    evaluate_repl(&mut engine_state, &mut stack, history_path, is_perf_true());
+                let ret_val = evaluate_repl(
+                    &mut engine_state,
+                    &mut stack,
+                    config_files::NUSHELL_FOLDER,
+                    is_perf_true(),
+                );
                 if is_perf_true() {
                     info!("repl eval {}:{}:{}", file!(), line!(), column!());
                 }
@@ -277,6 +311,7 @@ fn setup_config(
     stack: &mut Stack,
     config_file: Option<Spanned<String>>,
     env_file: Option<Spanned<String>>,
+    is_login_shell: bool,
 ) {
     #[cfg(feature = "plugin")]
     read_plugin_file(engine_state, stack, NUSHELL_FOLDER, is_perf_true());
@@ -287,6 +322,18 @@ fn setup_config(
 
     config_files::read_config_file(engine_state, stack, env_file, is_perf_true(), true);
     config_files::read_config_file(engine_state, stack, config_file, is_perf_true(), false);
+
+    if is_login_shell {
+        config_files::read_loginshell_file(engine_state, stack, is_perf_true());
+    }
+
+    // Give a warning if we see `$config` for a few releases
+    {
+        let working_set = StateWorkingSet::new(engine_state);
+        if working_set.find_variable(b"$config").is_some() {
+            println!("warning: use `let-env config = ...` instead of `let config = ...`");
+        }
+    }
 }
 
 fn parse_commandline_args(
@@ -318,14 +365,6 @@ fn parse_commandline_args(
     let _ = engine_state.merge_delta(delta, None, init_cwd);
 
     let mut stack = Stack::new();
-    stack.add_var(
-        CONFIG_VARIABLE_ID,
-        Value::Record {
-            cols: vec![],
-            vals: vec![],
-            span: Span::new(0, 0),
-        },
-    );
 
     // We should have a successful parse now
     if let Some(pipeline) = block.pipelines.get(0) {
@@ -344,26 +383,32 @@ fn parse_commandline_args(
             let env_file: Option<Expression> = call.get_flag_expr("env-config");
             let log_level: Option<Expression> = call.get_flag_expr("log-level");
             let threads: Option<Value> = call.get_flag(engine_state, &mut stack, "threads")?;
+            let table_mode: Option<Value> =
+                call.get_flag(engine_state, &mut stack, "table-mode")?;
 
             fn extract_contents(
                 expression: Option<Expression>,
-                engine_state: &mut EngineState,
-            ) -> Option<Spanned<String>> {
-                expression.map(|expr| {
-                    let contents = engine_state.get_span_contents(&expr.span);
-
-                    Spanned {
-                        item: String::from_utf8_lossy(contents).to_string(),
-                        span: expr.span,
+            ) -> Result<Option<Spanned<String>>, ShellError> {
+                if let Some(expr) = expression {
+                    let str = expr.as_string();
+                    if let Some(str) = str {
+                        Ok(Some(Spanned {
+                            item: str,
+                            span: expr.span,
+                        }))
+                    } else {
+                        Err(ShellError::TypeMismatch("string".into(), expr.span))
                     }
-                })
+                } else {
+                    Ok(None)
+                }
             }
 
-            let commands = extract_contents(commands, engine_state);
-            let testbin = extract_contents(testbin, engine_state);
-            let config_file = extract_contents(config_file, engine_state);
-            let env_file = extract_contents(env_file, engine_state);
-            let log_level = extract_contents(log_level, engine_state);
+            let commands = extract_contents(commands)?;
+            let testbin = extract_contents(testbin)?;
+            let config_file = extract_contents(config_file)?;
+            let env_file = extract_contents(env_file)?;
+            let log_level = extract_contents(log_level)?;
 
             let help = call.has_flag("help");
 
@@ -371,11 +416,7 @@ fn parse_commandline_args(
                 let full_help =
                     get_full_help(&Nu.signature(), &Nu.examples(), engine_state, &mut stack);
 
-                let _ = std::panic::catch_unwind(move || {
-                    let stdout = std::io::stdout();
-                    let mut stdout = stdout.lock();
-                    let _ = stdout.write_all(full_help.as_bytes());
-                });
+                let _ = std::panic::catch_unwind(move || stdout_write_all_and_flush(full_help));
 
                 std::process::exit(1);
             }
@@ -383,9 +424,7 @@ fn parse_commandline_args(
             if call.has_flag("version") {
                 let version = env!("CARGO_PKG_VERSION").to_string();
                 let _ = std::panic::catch_unwind(move || {
-                    let stdout = std::io::stdout();
-                    let mut stdout = stdout.lock();
-                    let _ = stdout.write_all(format!("{}\n", version).as_bytes());
+                    stdout_write_all_and_flush(format!("{}\n", version))
                 });
 
                 std::process::exit(0);
@@ -402,6 +441,7 @@ fn parse_commandline_args(
                 log_level,
                 perf,
                 threads,
+                table_mode,
             });
         }
     }
@@ -424,6 +464,7 @@ struct NushellCliArgs {
     log_level: Option<Spanned<String>>,
     perf: bool,
     threads: Option<Value>,
+    table_mode: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -482,6 +523,12 @@ impl Command for Nu {
                 "threads to use for parallel commands",
                 Some('t'),
             )
+            .named(
+                "table-mode",
+                SyntaxShape::String,
+                "the table mode to use. rounded is default.",
+                Some('m'),
+            )
             .optional(
                 "script file",
                 SyntaxShape::Filepath,
@@ -532,11 +579,6 @@ impl Command for Nu {
 pub fn is_perf_true() -> bool {
     IS_PERF.with(|value| *value.borrow())
 }
-
-// #[allow(dead_code)]
-// fn is_perf_value() -> bool {
-//     IS_PERF.with(|value| *value.borrow())
-// }
 
 fn set_is_perf_value(value: bool) {
     IS_PERF.with(|new_value| {
