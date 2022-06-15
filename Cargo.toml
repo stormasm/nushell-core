@@ -24,8 +24,8 @@ nu-ansi-term = "0.45.1"
 nu-cli = { version = "0.61.0"  }
 nu-color-config = { version = "0.61.0"  }
 #nu-command = { version = "0.61.0"  }
-#nu-command = { git = "https://github.com/stormasm/nu-command-tiny", branch = "main" }
-nu-command = { git = "https://github.com/stormasm/nu-command-core", branch = "nana" }
+nu-command = { git = "https://github.com/stormasm/nu-command-core", branch = "bp61" }
+#nu-command = { git = "https://github.com/stormasm/nu-command-core", branch = "nana" }
 nu-engine = { version = "0.61.0"  }
 nu-json = { version = "0.61.0"  }
 nu-parser = { version = "0.61.0"  }
