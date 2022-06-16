@@ -23,7 +23,7 @@ nu-ansi-term = "0.46.0"
 nu-cli = { version = "0.64.0"  }
 nu-color-config = { version = "0.64.0"  }
 #nu-command = { version = "0.64.0"  }
-nu-command = { git = "https://github.com/stormasm/nu-command-core", branch = "main" }
+nu-command = { git = "https://github.com/stormasm/nu-command-iox", branch = "main" }
 nu-engine = { version = "0.64.0"  }
 nu-json = { version = "0.64.0"  }
 nu-parser = { version = "0.64.0"  }
