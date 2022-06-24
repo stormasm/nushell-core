@@ -10,7 +10,7 @@ A barebones example of nu-command is
 which is just the core-commands and nothing else...
 
 With this crate as the basis you can build up crates from
-here that add additional commands commands.  The following
+here that add additional commands.  The following
 crates are a superset of nu-command-core...
 
 * [nu-command-iox](https://github.com/stormasm/nu-command-iox)
